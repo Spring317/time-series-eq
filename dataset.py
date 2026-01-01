@@ -1,0 +1,313 @@
+"""
+Memory-efficient data loader for DAS seismic data
+Uses lazy loading and memory mapping to handle large datasets
+"""
+
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+from typing import List, Tuple, Optional
+import os
+from pathlib import Path
+
+
+class DASDataset(Dataset):
+    """
+    Memory-efficient dataset that loads DAS data on-demand
+    Uses h5py with memory mapping to avoid loading entire dataset into RAM
+    """
+    
+    def __init__(
+        self,
+        file_paths: List[str],
+        labels: List[int],
+        window_size: int = 1024,
+        stride: int = 512,
+        num_channels: Optional[int] = None,
+        transform=None,
+        cache_file_info: bool = True
+    ):
+        """
+        Args:
+            file_paths: List of paths to HDF5 files
+            labels: List of labels (0=earthquake, 1=quarry blast)
+            window_size: Number of time samples per window
+            stride: Stride for sliding window
+            num_channels: Number of DAS channels (auto-detect if None)
+            transform: Optional data augmentation function
+            cache_file_info: Cache file metadata to speed up initialization
+        """
+        self.file_paths = file_paths
+        self.labels = labels
+        self.window_size = window_size
+        self.stride = stride
+        self.transform = transform
+        self.num_channels = num_channels
+        
+        # Build index of all windows across all files
+        self.windows_index = []
+        self._build_index(cache_file_info)
+        
+    def _build_index(self, use_cache: bool):
+        """
+        Build an index of all windows without loading data
+        Each entry: (file_idx, start_idx, num_samples, num_channels)
+        """
+        cache_path = Path("cache/dataset_index.npy")
+        
+        if use_cache and cache_path.exists():
+            print("Loading cached dataset index...")
+            cached_data = np.load(cache_path, allow_pickle=True).item()
+            self.windows_index = cached_data['windows_index']
+            self.num_channels = cached_data.get('num_channels', self.num_channels)
+            return
+        
+        print("Building dataset index...")
+        for file_idx, file_path in enumerate(self.file_paths):
+            try:
+                with h5py.File(file_path, 'r') as f:
+                    # DAS-BIGORRE data structure: python_processing/sr/data contains the strain rate data
+                    data_key = None
+                    shape = None
+                    
+                    # Try common paths
+                    possible_paths = [
+                        'python_processing/sr/data',
+                        'sr/data',
+                        'data'
+                    ]
+                    
+                    for path in possible_paths:
+                        try:
+                            if path in f:
+                                shape = f[path].shape
+                                data_key = path
+                                break
+                        except:
+                            continue
+                    
+                    if data_key is None or shape is None:
+                        print(f"Warning: Cannot find data in {file_path}")
+                        print(f"  Available keys: {list(f.keys())}")
+                        continue
+                    
+                    # Shape could be (time, channels) or (channels, time)
+                    # Detect based on which dimension is larger
+                    if len(shape) == 2:
+                        if shape[0] > shape[1]:
+                            num_samples, num_channels = shape
+                        else:
+                            num_channels, num_samples = shape
+                    else:
+                        print(f"Warning: Unexpected shape {shape} in {file_path}")
+                        continue
+                    
+                    if self.num_channels is None:
+                        self.num_channels = num_channels
+                    
+                    # Calculate number of windows in this file
+                    num_windows = max(1, (num_samples - self.window_size) // self.stride + 1)
+                    
+                    for win_idx in range(num_windows):
+                        start_idx = win_idx * self.stride
+                        self.windows_index.append({
+                            'file_idx': file_idx,
+                            'start_idx': start_idx,
+                            'data_key': data_key,
+                            'label': self.labels[file_idx],
+                            'is_transposed': shape[0] <= shape[1]  # True if (channels, time)
+                        })
+                        
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
+                continue
+        
+        print(f"Total windows: {len(self.windows_index)}")
+        
+        # Cache the index
+        if use_cache:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_data = {
+                'windows_index': self.windows_index,
+                'num_channels': self.num_channels
+            }
+            np.save(cache_path, cache_data)
+    
+    def __len__(self):
+        return len(self.windows_index)
+    
+    def __getitem__(self, idx):
+        """
+        Load a single window on-demand
+        Returns: (data, label) where data shape is (channels, time)
+        """
+        window_info = self.windows_index[idx]
+        file_idx = window_info['file_idx']
+        start_idx = window_info['start_idx']
+        data_key = window_info['data_key']
+        label = window_info['label']
+        is_transposed = window_info['is_transposed']
+        
+        # Open file and read only the required window
+        with h5py.File(self.file_paths[file_idx], 'r') as f:
+            if is_transposed:
+                # Shape: (channels, time)
+                data = f[data_key][:, start_idx:start_idx + self.window_size]
+                # Ensure we have the full window
+                if data.shape[1] < self.window_size:
+                    pad_width = ((0, 0), (0, self.window_size - data.shape[1]))
+                    data = np.pad(data, pad_width, mode='constant')
+            else:
+                # Shape: (time, channels)
+                data = f[data_key][start_idx:start_idx + self.window_size, :]
+                if data.shape[0] < self.window_size:
+                    pad_width = ((0, self.window_size - data.shape[0]), (0, 0))
+                    data = np.pad(data, pad_width, mode='constant')
+                # Transpose to (channels, time)
+                data = data.T
+        
+        # Convert to float32 and normalize
+        data = data.astype(np.float32)
+        
+        # Apply normalization per channel
+        mean = np.mean(data, axis=1, keepdims=True)
+        std = np.std(data, axis=1, keepdims=True) + 1e-8
+        data = (data - mean) / std
+        
+        # Apply augmentation if specified
+        if self.transform is not None:
+            data = self.transform(data)
+        
+        # Convert to torch tensor
+        data = torch.from_numpy(data)
+        label = torch.tensor(label, dtype=torch.long)
+        
+        return data, label
+
+
+class DataAugmentation:
+    """
+    Data augmentation for seismic waveforms
+    """
+    
+    def __init__(
+        self,
+        noise_level: float = 0.05,
+        time_shift_range: int = 50,
+        amplitude_scale_range: Tuple[float, float] = (0.9, 1.1)
+    ):
+        self.noise_level = noise_level
+        self.time_shift_range = time_shift_range
+        self.amplitude_scale_range = amplitude_scale_range
+    
+    def __call__(self, data: np.ndarray) -> np.ndarray:
+        """
+        Apply random augmentations
+        Args:
+            data: shape (channels, time)
+        Returns:
+            augmented data
+        """
+        # Add Gaussian noise
+        if np.random.rand() < 0.5:
+            noise = np.random.randn(*data.shape) * self.noise_level
+            data = data + noise
+        
+        # Random amplitude scaling
+        if np.random.rand() < 0.5:
+            scale = np.random.uniform(*self.amplitude_scale_range)
+            data = data * scale
+        
+        # Time shift (circular shift)
+        if np.random.rand() < 0.5:
+            shift = np.random.randint(-self.time_shift_range, self.time_shift_range)
+            data = np.roll(data, shift, axis=1)
+        
+        return data
+
+
+def create_dataloaders(
+    file_paths: List[str],
+    labels: List[int],
+    config: dict,
+    train_indices: List[int],
+    val_indices: List[int],
+    test_indices: List[int]
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    Create memory-efficient data loaders
+    """
+    
+    # Create augmentation transform for training
+    augment = None
+    if config['augmentation']['use_augmentation']:
+        augment = DataAugmentation(
+            noise_level=config['augmentation']['noise_level'],
+            time_shift_range=config['augmentation']['time_shift_range'],
+            amplitude_scale_range=config['augmentation']['amplitude_scale_range']
+        )
+    
+    # Create datasets
+    train_files = [file_paths[i] for i in train_indices]
+    train_labels = [labels[i] for i in train_indices]
+    train_dataset = DASDataset(
+        train_files,
+        train_labels,
+        window_size=config['data']['window_size'],
+        stride=config['data']['stride'],
+        num_channels=config['data']['num_channels'],
+        transform=augment
+    )
+    
+    val_files = [file_paths[i] for i in val_indices]
+    val_labels = [labels[i] for i in val_indices]
+    val_dataset = DASDataset(
+        val_files,
+        val_labels,
+        window_size=config['data']['window_size'],
+        stride=config['data']['stride'],
+        num_channels=config['data']['num_channels'],
+        transform=None
+    )
+    
+    test_files = [file_paths[i] for i in test_indices]
+    test_labels = [labels[i] for i in test_indices]
+    test_dataset = DASDataset(
+        test_files,
+        test_labels,
+        window_size=config['data']['window_size'],
+        stride=config['data']['stride'],
+        num_channels=config['data']['num_channels'],
+        transform=None
+    )
+    
+    # Create data loaders with memory-efficient settings
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['data']['batch_size'],
+        shuffle=True,
+        num_workers=config['data']['num_workers'],
+        pin_memory=True,
+        persistent_workers=True if config['data']['num_workers'] > 0 else False
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['data']['batch_size'],
+        shuffle=False,
+        num_workers=config['data']['num_workers'],
+        pin_memory=True,
+        persistent_workers=True if config['data']['num_workers'] > 0 else False
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config['data']['batch_size'],
+        shuffle=False,
+        num_workers=config['data']['num_workers'],
+        pin_memory=True,
+        persistent_workers=True if config['data']['num_workers'] > 0 else False
+    )
+    
+    return train_loader, val_loader, test_loader

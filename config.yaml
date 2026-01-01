@@ -1,0 +1,42 @@
+# Configuration for DAS Seismic Classification Pipeline
+
+data:
+  data_dir: "data"
+  cache_dir: "cache"
+  sample_rate: 200  # Hz, DAS sampling rate
+  window_size: 2000  # number of time samples per window (10s at 200Hz)
+  stride: 1000  # overlap between windows
+  num_channels: null  # auto-detect from data (typically ~9000 channels for 91km cable)
+  
+  # Memory management
+  batch_size: 16
+  prefetch_batches: 2
+  num_workers: 4
+  
+training:
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  early_stopping_patience: 10
+  validation_split: 0.2
+  test_split: 0.1
+  
+  # Class weights (if imbalanced)
+  use_class_weights: true
+  
+model:
+  type: "temporal_cnn"  # Options: temporal_cnn, lstm, transformer
+  hidden_dim: 128
+  num_layers: 4
+  dropout: 0.3
+  
+augmentation:
+  use_augmentation: true
+  noise_level: 0.05
+  time_shift_range: 50
+  amplitude_scale_range: [0.9, 1.1]
+  
+output:
+  model_dir: "models"
+  log_dir: "logs"
+  checkpoint_every: 5
