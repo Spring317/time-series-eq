@@ -2,25 +2,14 @@
   "dataset": "DAS-BIGORRE-2022",
   "description": "Fiber-Optics Distributed Acoustic Sensing records",
   "location": "Bigorre, Hautes-Pyr\u00e9n\u00e9es, France",
-  "period": "2022-08-31 to 2022-09-20",
-  "total_events": 19,
+  "period": "2022-09-03 to 2022-09-20",
+  "total_events": 13,
   "earthquakes": 13,
-  "quarry_blasts": 6,
+  "quarry_blasts": 0,
   "label_mapping": {
-    "0": "Earthquake",
-    "1": "Quarry Blast"
+    "0": "Earthquake"
   },
   "files": {
-    "DAS-BIGORRE_2022-08-31_07-59-21_UTC-005.h5": {
-      "type": "QB",
-      "magnitude": 0.7,
-      "label": 1
-    },
-    "DAS-BIGORRE_2022-09-01_09-19-21_UTC-016.h5": {
-      "type": "QB",
-      "magnitude": 0.8,
-      "label": 1
-    },
     "DAS-BIGORRE_2022-09-03_03-46-50_UTC-010.h5": {
       "type": "EQ",
       "magnitude": 0.6,
@@ -46,16 +35,6 @@
       "magnitude": 1.2,
       "label": 0
     },
-    "DAS-BIGORRE_2022-09-06_10-06-50_UTC-020.h5": {
-      "type": "QB",
-      "magnitude": 1.0,
-      "label": 1
-    },
-    "DAS-BIGORRE_2022-09-08_09-56-50_UTC-001.h5": {
-      "type": "QB",
-      "magnitude": 1.1,
-      "label": 1
-    },
     "DAS-BIGORRE_2022-09-08_17-06-50_UTC-004.h5": {
       "type": "EQ",
       "magnitude": 0.8,
@@ -70,16 +49,6 @@
       "type": "EQ",
       "magnitude": 0.4,
       "label": 0
-    },
-    "DAS-BIGORRE_2022-09-12_10-06-50_UTC-002.h5": {
-      "type": "QB",
-      "magnitude": 0.6,
-      "label": 1
-    },
-    "DAS-BIGORRE_2022-09-14_09-16-50_UTC-014.h5": {
-      "type": "QB",
-      "magnitude": 1.1,
-      "label": 1
     },
     "DAS-BIGORRE_2022-09-15_09-06-50_UTC-009.h5": {
       "type": "EQ",
