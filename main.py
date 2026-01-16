@@ -8,10 +8,14 @@ from pathlib import Path
 from train import Trainer
 
 
-def load_labels(labels_file):
+def load_labels(labels_file, use_processed=False):
     """
     Load labels from JSON file
     Returns file_paths and labels lists
+    
+    Args:
+        labels_file: Path to labels JSON file
+        use_processed: If True, use processed_chunks directory, else use original data
     """
     with open(labels_file, 'r') as f:
         labels_dict = json.load(f)
@@ -19,8 +23,32 @@ def load_labels(labels_file):
     file_paths = []
     labels = []
     
+    # Choose directory based on use_processed flag
+    if use_processed:
+        data_dir = Path('data/processed_chunks')
+        suffix = '_processed.h5'
+    else:
+        data_dir = Path('data')
+        suffix = ''
+    
     for filename, label in labels_dict.items():
-        file_path = Path('data') / filename
+        # For processed files, check if filename already has _processed suffix
+        if use_processed:
+            # If filename already ends with _processed.h5, use it as-is
+            if filename.endswith('_processed.h5'):
+                file_path = data_dir / filename
+            else:
+                # Otherwise, add _processed suffix
+                processed_filename = filename.replace('.h5', '_processed.h5')
+                file_path = data_dir / processed_filename
+        else:
+            # For original files, remove _processed suffix if present
+            if filename.endswith('_processed.h5'):
+                original_filename = filename.replace('_processed.h5', '.h5')
+                file_path = data_dir / original_filename
+            else:
+                file_path = data_dir / filename
+            
         if file_path.exists():
             file_paths.append(str(file_path))
             labels.append(label)
@@ -31,6 +59,11 @@ def load_labels(labels_file):
 
 
 def main():
+    import sys
+    
+    # Check for command-line argument to use processed files
+    use_processed = '--processed' in sys.argv or '-p' in sys.argv
+    
     # Load configuration
     config_file = 'config.yaml'
     labels_file = 'labels.json'
@@ -55,9 +88,20 @@ def main():
     with open(config_file, 'r') as f:
         config = yaml.safe_load(f)
     
+    # Show data source
+    if use_processed:
+        print("\n" + "="*70)
+        print("Using PROCESSED data from data/processed_chunks/")
+        print("="*70)
+    else:
+        print("\n" + "="*70)
+        print("Using ORIGINAL data from data/")
+        print("To use processed data, run: python main.py --processed")
+        print("="*70)
+    
     # Load labels
-    print("Loading labels...")
-    file_paths, labels = load_labels(labels_file)
+    print("\nLoading labels...")
+    file_paths, labels = load_labels(labels_file, use_processed=use_processed)
     
     print(f"\nDataset summary:")
     print(f"Total files: {len(file_paths)}")

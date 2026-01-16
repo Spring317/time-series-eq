@@ -88,18 +88,19 @@ class TemporalCNN(nn.Module):
 
 class LSTMClassifier(nn.Module):
     """
-    LSTM-based classifier for seismic data
-    Good for capturing temporal dependencies
+    Simplified LSTM-based classifier for seismic data
+    Single LSTM layer with reduced parameters (<1M)
+    NO CNN layers - direct LSTM processing
     """
     
     def __init__(
         self,
         num_channels: int,
         num_classes: int = 2,
-        hidden_dim: int = 128,
-        num_layers: int = 2,
+        hidden_dim: int = 64,  # Reduced from 128
+        num_layers: int = 1,  # Single LSTM layer
         dropout: float = 0.3,
-        bidirectional: bool = True
+        bidirectional: bool = False  # Unidirectional to reduce params
     ):
         super(LSTMClassifier, self).__init__()
         
@@ -108,28 +109,28 @@ class LSTMClassifier(nn.Module):
         self.num_layers = num_layers
         self.bidirectional = bidirectional
         
-        # Input projection
-        self.input_proj = nn.Linear(num_channels, hidden_dim)
+        # Simple average pooling to reduce channels dimension
+        # This reduces input size without learnable parameters
+        self.pool_size = 4  # Pool every 4 channels
+        self.pooled_channels = num_channels // self.pool_size
         
-        # LSTM layers
+        # Single LSTM layer (no CNN preprocessing)
         self.lstm = nn.LSTM(
-            hidden_dim,
+            self.pooled_channels,  # Use pooled channels directly
             hidden_dim,
             num_layers=num_layers,
             batch_first=True,
-            dropout=dropout if num_layers > 1 else 0,
+            dropout=0,  # No dropout with single layer
             bidirectional=bidirectional
         )
         
         # Output dimension after LSTM
         lstm_out_dim = hidden_dim * 2 if bidirectional else hidden_dim
         
-        # Classification head
+        # Minimal classification head
         self.classifier = nn.Sequential(
-            nn.Linear(lstm_out_dim, hidden_dim),
-            nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes)
+            nn.Linear(lstm_out_dim, num_classes)
         )
     
     def forward(self, x):
@@ -139,18 +140,23 @@ class LSTMClassifier(nn.Module):
         Returns:
             logits: (batch, num_classes)
         """
-        # Transpose to (batch, time, channels)
+        batch_size, channels, time_steps = x.shape
+        
+        # Pool channels to reduce dimensionality (no learnable params)
+        # Reshape to (batch, channels//pool_size, pool_size, time)
+        x = x[:, :self.pooled_channels * self.pool_size, :]
+        x = x.view(batch_size, self.pooled_channels, self.pool_size, time_steps)
+        # Average pool: (batch, pooled_channels, time)
+        x = x.mean(dim=2)
+        
+        # Transpose to (batch, time, pooled_channels)
         x = x.transpose(1, 2)
         
-        # Project input
-        x = self.input_proj(x)
-        
-        # LSTM
+        # LSTM - single layer
         lstm_out, (h_n, c_n) = self.lstm(x)
         
         # Use the last hidden state
         if self.bidirectional:
-            # Concatenate forward and backward hidden states
             h_n = torch.cat([h_n[-2], h_n[-1]], dim=1)
         else:
             h_n = h_n[-1]

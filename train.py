@@ -23,6 +23,30 @@ from dataset import create_dataloaders
 from models import create_model
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for handling class imbalance
+    Focuses on hard-to-classify examples
+    """
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha  # Class weights
+        self.gamma = gamma  # Focusing parameter
+        self.reduction = reduction
+    
+    def forward(self, inputs, targets):
+        ce_loss = nn.functional.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
 class Trainer:
     """
     Memory-efficient trainer with gradient accumulation
@@ -92,10 +116,24 @@ class Trainer:
         if self.config['training']['use_class_weights']:
             labels_array = np.array(train_labels)
             class_counts = np.bincount(labels_array)
-            class_weights = 1.0 / class_counts
-            class_weights = class_weights / class_weights.sum()
+            
+            # Calculate effective weights using inverse frequency
+            # This gives more weight to minority class (quarry blasts: 6 vs earthquakes: 13)
+            total_samples = len(labels_array)
+            num_classes = len(class_counts)
+            
+            # Effective number of samples approach (better for severe imbalance)
+            # Weight = total / (num_classes * count)
+            class_weights = total_samples / (num_classes * class_counts)
+            
+            # Normalize weights so they sum to num_classes
+            class_weights = class_weights * num_classes / class_weights.sum()
+            
             self.class_weights = torch.FloatTensor(class_weights).to(self.device)
-            print(f"Class weights: {self.class_weights}")
+            print(f"Class imbalance:")
+            print(f"  Earthquakes (0): {class_counts[0]} samples, weight: {class_weights[0]:.4f}")
+            print(f"  Quarry blasts (1): {class_counts[1]} samples, weight: {class_weights[1]:.4f}")
+            print(f"  Weight ratio: {class_weights[1]/class_weights[0]:.2f}x more weight on minority class")
         else:
             self.class_weights = None
     
@@ -111,8 +149,18 @@ class Trainer:
         num_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         print(f"Model parameters: {num_params:,}")
         
-        # Loss function
-        self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+        # Loss function - choose between CrossEntropy and Focal Loss
+        use_focal_loss = self.config['training'].get('use_focal_loss', False)
+        
+        if use_focal_loss:
+            # Focal Loss - better for severe class imbalance
+            focal_gamma = self.config['training'].get('focal_gamma', 2.0)
+            self.criterion = FocalLoss(alpha=self.class_weights, gamma=focal_gamma)
+            print(f"Using Focal Loss (gamma={focal_gamma}) with class weights")
+        else:
+            # Standard Cross Entropy with class weights
+            self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+            print(f"Using Cross Entropy Loss with class weights")
         
         # Optimizer
         self.optimizer = optim.AdamW(

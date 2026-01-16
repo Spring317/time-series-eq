@@ -21,7 +21,7 @@ class DASDataset(Dataset):
     def __init__(
         self,
         file_paths: List[str],
-        labels: List[int],
+        labels,  # Can be List[int] or Dict[str, int]
         window_size: int = 1024,
         stride: int = 512,
         num_channels: Optional[int] = None,
@@ -31,7 +31,7 @@ class DASDataset(Dataset):
         """
         Args:
             file_paths: List of paths to HDF5 files
-            labels: List of labels (0=earthquake, 1=quarry blast)
+            labels: List of labels or dict mapping filenames to labels (0=earthquake, 1=quarry blast)
             window_size: Number of time samples per window
             stride: Stride for sliding window
             num_channels: Number of DAS channels (auto-detect if None)
@@ -39,7 +39,19 @@ class DASDataset(Dataset):
             cache_file_info: Cache file metadata to speed up initialization
         """
         self.file_paths = file_paths
-        self.labels = labels
+        
+        # Convert labels dict to list if necessary
+        if isinstance(labels, dict):
+            self.labels = []
+            for file_path in file_paths:
+                filename = Path(file_path).name
+                if filename in labels:
+                    self.labels.append(labels[filename])
+                else:
+                    raise ValueError(f"Label not found for file: {filename}")
+        else:
+            self.labels = labels
+            
         self.window_size = window_size
         self.stride = stride
         self.transform = transform
@@ -54,7 +66,13 @@ class DASDataset(Dataset):
         Build an index of all windows without loading data
         Each entry: (file_idx, start_idx, num_samples, num_channels)
         """
-        cache_path = Path("cache/dataset_index.npy")
+        # Create a unique cache key based on file paths and parameters
+        import hashlib
+        files_hash = hashlib.md5(
+            '|'.join(self.file_paths).encode() + 
+            f'{self.window_size}_{self.stride}'.encode()
+        ).hexdigest()[:12]
+        cache_path = Path(f"cache/dataset_index_{files_hash}.npy")
         
         if use_cache and cache_path.exists():
             print("Loading cached dataset index...")
@@ -71,20 +89,32 @@ class DASDataset(Dataset):
                     data_key = None
                     shape = None
                     
-                    # Try common paths
+                    # Helper function to check nested paths
+                    def check_path(f, path):
+                        parts = path.split('/')
+                        obj = f
+                        for part in parts:
+                            if part in obj:
+                                obj = obj[part]
+                            else:
+                                return None
+                        return obj
+                    
+                    # Try common paths (processed files use 'data' directly)
                     possible_paths = [
+                        'data',
                         'python_processing/sr/data',
-                        'sr/data',
-                        'data'
+                        'sr/data'
                     ]
                     
                     for path in possible_paths:
                         try:
-                            if path in f:
-                                shape = f[path].shape
+                            dataset = check_path(f, path)
+                            if dataset is not None and hasattr(dataset, 'shape'):
+                                shape = dataset.shape
                                 data_key = path
                                 break
-                        except:
+                        except Exception as e:
                             continue
                     
                     if data_key is None or shape is None:
@@ -105,6 +135,11 @@ class DASDataset(Dataset):
                     
                     if self.num_channels is None:
                         self.num_channels = num_channels
+                        print(f"Setting reference channel count: {num_channels}")
+                    elif num_channels != self.num_channels:
+                        print(f"Warning: Channel mismatch in {Path(file_path).name}:")
+                        print(f"  Expected {self.num_channels}, got {num_channels}")
+                        print(f"  This file will be padded/cropped to match.")
                     
                     # Calculate number of windows in this file
                     num_windows = max(1, (num_samples - self.window_size) // self.stride + 1)
@@ -116,11 +151,15 @@ class DASDataset(Dataset):
                             'start_idx': start_idx,
                             'data_key': data_key,
                             'label': self.labels[file_idx],
-                            'is_transposed': shape[0] <= shape[1]  # True if (channels, time)
+                            'is_transposed': shape[0] <= shape[1],  # True if (channels, time)
+                            'file_channels': num_channels  # Store actual channel count
                         })
                         
             except Exception as e:
-                print(f"Error processing {file_path}: {e}")
+                import traceback
+                print(f"Error processing {file_path}:")
+                print(f"  {type(e).__name__}: {e}")
+                traceback.print_exc()
                 continue
         
         print(f"Total windows: {len(self.windows_index)}")
@@ -149,38 +188,65 @@ class DASDataset(Dataset):
         label = window_info['label']
         is_transposed = window_info['is_transposed']
         
+        # Helper function to navigate nested HDF5 groups
+        def get_dataset(f, path):
+            parts = path.split('/')
+            obj = f
+            for part in parts:
+                obj = obj[part]
+            return obj
+        
         # Open file and read only the required window
         with h5py.File(self.file_paths[file_idx], 'r') as f:
+            dataset = get_dataset(f, data_key)
             if is_transposed:
                 # Shape: (channels, time)
-                data = f[data_key][:, start_idx:start_idx + self.window_size]
+                data = dataset[:, start_idx:start_idx + self.window_size]
+                # CRITICAL: Immediately copy to break memory mapping
+                data = np.array(data, dtype=np.float32, copy=True)
                 # Ensure we have the full window
                 if data.shape[1] < self.window_size:
                     pad_width = ((0, 0), (0, self.window_size - data.shape[1]))
                     data = np.pad(data, pad_width, mode='constant')
             else:
                 # Shape: (time, channels)
-                data = f[data_key][start_idx:start_idx + self.window_size, :]
+                data = dataset[start_idx:start_idx + self.window_size, :]
+                # CRITICAL: Immediately copy to break memory mapping
+                data = np.array(data, dtype=np.float32, copy=True)
                 if data.shape[0] < self.window_size:
                     pad_width = ((0, self.window_size - data.shape[0]), (0, 0))
                     data = np.pad(data, pad_width, mode='constant')
                 # Transpose to (channels, time)
                 data = data.T
         
-        # Convert to float32 and normalize
-        data = data.astype(np.float32)
+        # Handle channel count mismatches
+        file_channels = window_info.get('file_channels', self.num_channels)
+        if data.shape[0] != self.num_channels:
+            if data.shape[0] < self.num_channels:
+                # Pad with zeros
+                pad_channels = self.num_channels - data.shape[0]
+                padding = np.zeros((pad_channels, data.shape[1]), dtype=np.float32)
+                data = np.vstack([data, padding])
+            else:
+                # Crop to match
+                data = data[:self.num_channels, :]
         
-        # Apply normalization per channel
-        mean = np.mean(data, axis=1, keepdims=True)
-        std = np.std(data, axis=1, keepdims=True) + 1e-8
+        # Apply normalization per channel (ensure float32 throughout)
+        mean = np.mean(data, axis=1, keepdims=True, dtype=np.float32)
+        std = np.std(data, axis=1, keepdims=True, dtype=np.float32) + np.float32(1e-8)
         data = (data - mean) / std
+        
+        # Ensure contiguous array in memory
+        data = np.ascontiguousarray(data, dtype=np.float32)
         
         # Apply augmentation if specified
         if self.transform is not None:
             data = self.transform(data)
         
-        # Convert to torch tensor
-        data = torch.from_numpy(data)
+        # Convert to torch tensor - create independent copy
+        # Using .copy() on numpy array before torch conversion ensures no shared memory
+        data_copy = np.array(data, dtype=np.float32, copy=True, order='C')
+        data = torch.from_numpy(data_copy)
         label = torch.tensor(label, dtype=torch.long)
         
         return data, label
@@ -207,16 +273,19 @@ class DataAugmentation:
         Args:
             data: shape (channels, time)
         Returns:
-            augmented data
+            augmented data (contiguous float32 array)
         """
+        # Ensure input is contiguous
+        data = np.ascontiguousarray(data, dtype=np.float32)
+        
         # Add Gaussian noise
         if np.random.rand() < 0.5:
-            noise = np.random.randn(*data.shape) * self.noise_level
+            noise = np.random.randn(*data.shape).astype(np.float32) * self.noise_level
             data = data + noise
         
         # Random amplitude scaling
         if np.random.rand() < 0.5:
-            scale = np.random.uniform(*self.amplitude_scale_range)
+            scale = np.float32(np.random.uniform(*self.amplitude_scale_range))
             data = data * scale
         
         # Time shift (circular shift)
@@ -224,7 +293,8 @@ class DataAugmentation:
             shift = np.random.randint(-self.time_shift_range, self.time_shift_range)
             data = np.roll(data, shift, axis=1)
         
-        return data
+        # Ensure output is contiguous
+        return np.ascontiguousarray(data, dtype=np.float32)
 
 
 def create_dataloaders(
@@ -305,9 +375,8 @@ def create_dataloaders(
         test_dataset,
         batch_size=config['data']['batch_size'],
         shuffle=False,
-        num_workers=config['data']['num_workers'],
-        pin_memory=True,
-        persistent_workers=True if config['data']['num_workers'] > 0 else False
+        num_workers=0,  # Use single process for test to avoid HDF5 memory-map issues
+        pin_memory=True
     )
     
     return train_loader, val_loader, test_loader
