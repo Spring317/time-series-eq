@@ -8,6 +8,10 @@ data:
   stride: 1000  # overlap between windows
   num_channels: null  # auto-detect from data (typically ~9000 channels for 91km cable)
   
+  # STEAD dataset parameters
+  stead_data_dir: "data/stead"  # Directory containing STEAD files
+  stead_window_size: 6000  # STEAD has 6000 time samples (60s at 100Hz)
+  
   # Memory management
   batch_size: 16
   prefetch_batches: 2
@@ -21,13 +25,17 @@ training:
   validation_split: 0.2
   test_split: 0.1
   
-  # Class weights (if imbalanced)
-  use_class_weights: true
+  # Class imbalance handling (13 earthquakes vs 6 quarry blasts)
+  use_class_weights: true  # Inverse frequency weighting
+  use_focal_loss: false  # Set to true for more aggressive imbalance handling
+  focal_gamma: 2.0  # Higher = more focus on hard examples (only if use_focal_loss=true)
   
 model:
-  type: "temporal_cnn"  # Options: temporal_cnn, lstm, transformer
-  hidden_dim: 128
-  num_layers: 4
+  type: "lstm"  # Simplified single-layer LSTM (138K params)
+  hidden_dim: 64  # Reduced for smaller model
+  num_layers: 1  # Single LSTM layer
+  bidirectional: false  # Unidirectional to reduce params
+  dropout: 0.3
   dropout: 0.3
   
 augmentation:
