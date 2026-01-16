@@ -44,7 +44,7 @@ from load_preprocessed_stead import (
     create_dataloaders_from_preprocessed,
     PreprocessedSTEADDataset
 )
-from lighteq_models import get_lighteq_model
+from models import LSTMClassifier
 
 # Optional: for raw processing (if --from-raw is used)
 try:
@@ -117,16 +117,28 @@ class LightEQTrainer:
         self.epoch = 0
     
     def _create_model(self) -> nn.Module:
-        """Create LightEQ model"""
-        model_type = self.config.get('model_type', 'medium')
+        """Create LSTM model for spectrogram input"""
         num_classes = self.config.get('num_classes', 2)
+        hidden_dim = self.config.get('hidden_dim', 64)
+        num_layers = self.config.get('num_layers', 2)
+        dropout = self.config.get('dropout', 0.3)
+        bidirectional = self.config.get('bidirectional', True)
         
-        print(f"Creating LightEQ model: {model_type}")
+        # Input shape from STFT: (batch, 3, 151, 41)
+        # Reshape to (batch, 3*41, 151) = (batch, 123, 151) for LSTM
+        # This treats freq*channels as input features, time as sequence
+        num_channels = 3 * 41  # 123 channels (3 components * 41 freq bins)
         
-        return get_lighteq_model(
-            model_type=model_type,
+        print(f"Creating LSTM model: hidden_dim={hidden_dim}, layers={num_layers}, bidirectional={bidirectional}")
+        print(f"  Input: (batch, {num_channels}, time_steps)")
+        
+        return LSTMClassifier(
+            num_channels=num_channels,
             num_classes=num_classes,
-            dropout=self.config.get('dropout', 0.25)
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout,
+            bidirectional=bidirectional
         )
     
     def prepare_stead_data(self, from_raw: bool = False) -> Tuple[DataLoader, DataLoader]:
@@ -302,6 +314,11 @@ class LightEQTrainer:
             data = data.to(self.device)
             labels = labels.to(self.device)
             
+            # Reshape STFT spectrogram for LSTM: (batch, 3, 151, 41) -> (batch, 123, 151)
+            batch_size = data.size(0)
+            data = data.permute(0, 1, 3, 2)  # (batch, 3, 41, 151)
+            data = data.reshape(batch_size, -1, data.size(-1))  # (batch, 123, 151)
+            
             # Forward pass
             self.optimizer.zero_grad()
             outputs = self.model(data)
@@ -347,6 +364,11 @@ class LightEQTrainer:
             for data, labels in tqdm(val_loader, desc='Validation'):
                 data = data.to(self.device)
                 labels = labels.to(self.device)
+                
+                # Reshape STFT spectrogram for LSTM: (batch, 3, 151, 41) -> (batch, 123, 151)
+                batch_size = data.size(0)
+                data = data.permute(0, 1, 3, 2)  # (batch, 3, 41, 151)
+                data = data.reshape(batch_size, -1, data.size(-1))  # (batch, 123, 151)
                 
                 outputs = self.model(data)
                 loss = self.criterion(outputs, labels)
@@ -461,6 +483,11 @@ class LightEQTrainer:
             for data, labels in tqdm(test_loader, desc='Testing on DAS'):
                 data = data.to(self.device)
                 
+                # Reshape STFT spectrogram for LSTM: (batch, 3, 151, 41) -> (batch, 123, 151)
+                batch_size = data.size(0)
+                data = data.permute(0, 1, 3, 2)  # (batch, 3, 41, 151)
+                data = data.reshape(batch_size, -1, data.size(-1))  # (batch, 123, 151)
+                
                 outputs = self.model(data)
                 probs = torch.softmax(outputs, dim=1)
                 preds = outputs.argmax(dim=1).cpu().numpy()
@@ -555,9 +582,11 @@ def load_config(config_path: str = 'config.yaml') -> Dict:
     else:
         config = {}
     
-    # Set defaults for LightEQ training
+    # Set defaults for LSTM training
     defaults = {
-        'model_type': 'medium',  # 'light', 'medium', 'full'
+        'hidden_dim': 64,
+        'num_layers': 2,
+        'bidirectional': True,
         'num_classes': 2,
         'batch_size': 64,
         'learning_rate': 0.001,
@@ -633,10 +662,22 @@ def main():
         help='Process from raw HDF5 instead of pre-processed numpy files'
     )
     parser.add_argument(
-        '--model-type',
-        choices=['light', 'medium', 'full'],
+        '--hidden-dim',
+        type=int,
         default=None,
-        help='Model type (overrides config)'
+        help='LSTM hidden dimension (overrides config)'
+    )
+    parser.add_argument(
+        '--num-layers',
+        type=int,
+        default=None,
+        help='Number of LSTM layers (overrides config)'
+    )
+    parser.add_argument(
+        '--bidirectional',
+        action='store_true',
+        default=None,
+        help='Use bidirectional LSTM'
     )
     parser.add_argument(
         '--epochs',
@@ -670,8 +711,12 @@ def main():
     # Override with command line args
     if args.stead_dir:
         config['stead']['preprocessed_dir'] = args.stead_dir
-    if args.model_type:
-        config['model_type'] = args.model_type
+    if args.hidden_dim:
+        config['hidden_dim'] = args.hidden_dim
+    if args.num_layers:
+        config['num_layers'] = args.num_layers
+    if args.bidirectional is not None:
+        config['bidirectional'] = args.bidirectional
     if args.epochs:
         config['num_epochs'] = args.epochs
     if args.batch_size:
