@@ -1,18 +1,67 @@
 # Configuration for DAS Seismic Classification Pipeline
 
+# ============================================
+# LightEQ-style STFT Preprocessing Configuration
+# State-of-the-Art preprocessing from LightEQ paper
+# ============================================
+
+# LightEQ Model Settings
+model_type: "medium"  # 'light', 'medium', 'full' - LightEQ CNN+LSTM variants
+num_classes: 2  # earthquake vs noise/quarry blast
+dropout: 0.25
+norm_mode: "max"  # 'max' or 'std' normalization
+
+# Training Settings
+batch_size: 64
+learning_rate: 0.001
+weight_decay: 0.00001
+num_epochs: 50
+early_stop_patience: 15
+num_workers: 4
+
+# Output directories
+log_dir: "logs/lighteq"
+model_dir: "models/lighteq"
+
+# STEAD Dataset Configuration (Training)
+stead:
+  # Pre-processed numpy files (FAST - recommended!)
+  preprocessed_dir: "/storage/student8/STEAD"
+  file_prefix: "76"  # Loads X_train76.npy, y_train76.npy, etc.
+  val_split: 0.1
+  
+  # Raw HDF5 files (only if --from-raw is used)
+  hdf5_path: "data/stead/merge.hdf5"
+  csv_path: "data/stead/merge.csv"
+  train_ratio: 0.85
+  val_ratio: 0.10
+  test_ratio: 0.05
+  max_samples_per_class: null  # Set to limit data (e.g., 50000 for faster training)
+  balance_classes: true
+  # LightEQ Augmentation rates
+  shift_event_r: 0.9
+  add_event_r: 0.5
+  add_noise_r: 0.4
+  scale_amplitude_r: 0.3
+
+# DAS Dataset Configuration (Testing)
+das:
+  data_dir: "data"
+  labels_path: "labels.json"
+  window_size: 12000  # 60s at 200Hz (matches STEAD 60s at 100Hz)
+  stride: 6000
+
+# ============================================
+# Legacy DAS-only Pipeline Settings
+# ============================================
+
 data:
   data_dir: "data"
   cache_dir: "cache"
   sample_rate: 200  # Hz, DAS sampling rate
   window_size: 2000  # number of time samples per window (10s at 200Hz)
   stride: 1000  # overlap between windows
-  num_channels: null  # auto-detect from data (typically ~9000 channels for 91km cable)
-  
-  # STEAD dataset parameters
-  stead_data_dir: "data/stead"  # Directory containing STEAD files
-  stead_window_size: 6000  # STEAD has 6000 time samples (60s at 100Hz)
-  
-  # Memory management
+  num_channels: null  # auto-detect from data
   batch_size: 16
   prefetch_batches: 2
   num_workers: 4
@@ -24,18 +73,15 @@ training:
   early_stopping_patience: 10
   validation_split: 0.2
   test_split: 0.1
-  
-  # Class imbalance handling (13 earthquakes vs 6 quarry blasts)
-  use_class_weights: true  # Inverse frequency weighting
-  use_focal_loss: false  # Set to true for more aggressive imbalance handling
-  focal_gamma: 2.0  # Higher = more focus on hard examples (only if use_focal_loss=true)
+  use_class_weights: true
+  use_focal_loss: false
+  focal_gamma: 2.0
   
 model:
-  type: "lstm"  # Simplified single-layer LSTM (138K params)
-  hidden_dim: 64  # Reduced for smaller model
-  num_layers: 1  # Single LSTM layer
-  bidirectional: false  # Unidirectional to reduce params
-  dropout: 0.3
+  type: "lstm"
+  hidden_dim: 64
+  num_layers: 1
+  bidirectional: false
   dropout: 0.3
   
 augmentation:
