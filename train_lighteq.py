@@ -107,8 +107,7 @@ class LightEQTrainer:
             self.optimizer,
             mode='min',
             factor=0.5,
-            patience=5,
-            verbose=True
+            patience=5
         )
         
         # Training state
@@ -221,16 +220,20 @@ class LightEQTrainer:
             # Load pre-processed numpy files (FAST!)
             stead_dir = stead_config.get('preprocessed_dir', '/storage/student8/STEAD')
             prefix = stead_config.get('file_prefix', '76')
+            max_samples = stead_config.get('max_samples', None)
             
             print(f"Loading pre-processed STEAD from: {stead_dir}")
             print(f"File prefix: {prefix}")
+            if max_samples:
+                print(f"Limiting to {max_samples} samples")
             
             train_loader, val_loader, self.stead_test_loader = create_dataloaders_from_preprocessed(
                 data_dir=stead_dir,
                 prefix=prefix,
                 batch_size=batch_size,
                 val_split=stead_config.get('val_split', 0.1),
-                num_workers=num_workers
+                num_workers=num_workers,
+                max_samples=max_samples
             )
         
         print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
@@ -617,7 +620,7 @@ def load_config(config_path: str = 'config.yaml') -> Dict:
             'scale_amplitude_r': 0.3
         },
         'das': {
-            'data_dir': 'data',
+            'data_dir': '/storage/student8/DAS_Reduce',
             'labels_path': 'labels.json',
             'window_size': 12000,  # 60 seconds at 200Hz
             'stride': 6000
@@ -655,6 +658,11 @@ def main():
         '--stead-dir',
         default=None,
         help='Path to pre-processed STEAD directory (default: /storage/student8/STEAD)'
+    )
+    parser.add_argument(
+        '--das-dir',
+        default=None,
+        help='Path to DAS test data directory (default: /storage/student8/DAS_Reduce)'
     )
     parser.add_argument(
         '--from-raw',
@@ -711,6 +719,8 @@ def main():
     # Override with command line args
     if args.stead_dir:
         config['stead']['preprocessed_dir'] = args.stead_dir
+    if args.das_dir:
+        config['das']['data_dir'] = args.das_dir
     if args.hidden_dim:
         config['hidden_dim'] = args.hidden_dim
     if args.num_layers:
@@ -722,7 +732,7 @@ def main():
     if args.batch_size:
         config['batch_size'] = args.batch_size
     if args.max_samples:
-        config['stead']['max_samples_per_class'] = args.max_samples
+        config['stead']['max_samples'] = args.max_samples
     
     # Print config
     print("\nConfiguration:")
